@@ -1,36 +1,9 @@
-import React, { useMemo, useReducer, useState, useEffect, createContext, useContext } from "react";
+import React, {  useReducer, useState, useEffect, createContext, useContext } from "react";
 import { Dialog, DialogTitle, DialogContent, DialogActions, Button, TextField, MenuItem, Select, FormControl, InputLabel, Snackbar, Alert, Switch, FormControlLabel, Box, Typography, Divider, Tooltip, IconButton, Chip } from "@mui/material";
 import DeleteOutlineIcon from "@mui/icons-material/DeleteOutline";
 import CompressIcon from "@mui/icons-material/Compress";
 import RestartAltIcon from "@mui/icons-material/RestartAlt";
 
-/**
- * ====== Simulador de Memoria (MVP v2 corregido) — Español ======
- *
- * Correcciones aplicadas según tu lista:
- * 1) Inputs sin valores por defecto; validaciones y alertas.
- * 2) En captura de fijas se muestra **KB restantes** por asignar (no la suma).
- * 3) Fijas: particiones con **borde claro**; si hay proceso, se **llena proporcional** al uso
- *    y el sobrante de la partición muestra patrón rojo/blanco (fragmentación interna) distinto
- *    del patrón de "partición vacía".
- * 4) Tablas: **botón por fila** para eliminar/terminar; en espera muestra mensajes:
- *    - Fijas: “demasiado grande para las particiones”.
- *    - Dinámicas: “en espera por falta de memoria” o “por fragmentación externa”.
- * 5) Panel de métricas:
- *    - Quitado el card de SO.
- *    - Dinámicas: solo **Externa**; Interna oculta.
- *    - Fijas: solo **Interna**; Externa oculta. Se añade **Desperdicio particiones vacías**
- *      y **Desperdicio total = interna + vacías**.
- * 6) FIFO flexible/arreglo: estricto = **solo intenta el primero**; flexible = intenta con
- *    todos los que quepan (orden de llegada preservado).
- * 7) Fijas: etiqueta dentro de bloque **Nombre (tamañoKB)**; Tooltip multilínea:
- *      Partición N: (XKB) 
- Proceso: (YKB)
- * 8) Dinámicas: cálculo de **fragmentación externa** corregido: solo si la **memoria libre total ≥
- *    tamaño del menor en espera** y **ningún hueco es suficiente**. Se añaden razones de espera.
- */
-
-// =============================== Estado global ===============================
 const PaletaColores = [
   "#0ea5e9", "#22c55e", "#eab308", "#f97316", "#ec4899",
   "#8b5cf6", "#14b8a6", "#f43f5e", "#84cc16", "#06b6d4",
@@ -65,11 +38,11 @@ const Acciones = {
 const uiInicial = { modo: "menu", algoritmo: "firstFit", fifoFlexible: false };
 const estadoInicial = {
   ui: uiInicial,
-  totalUsuario: 0, // memoria del usuario (sin SO)
-  so: 0,           // 10% visual
+  totalUsuario: 0, 
+  so: 0,          
 
   // Dinámicas
-  segmentos: [], // [ {id, tipo: 'os'|'proceso'|'hueco', tamaño, nombre?, color?} ]
+  segmentos: [], 
   ejecutandoIds: [],
   esperando: [],
 
@@ -110,7 +83,7 @@ function recalc(estado, etiqueta){
 
 function reductor(estado, accion){
   switch(accion.tipo){
-    // ================= Menú / Inicio =================
+
     case Acciones.INICIALIZAR_DINAMICAS: {
       const { totalUsuario } = accion.datos; if (!Number.isFinite(totalUsuario) || totalUsuario<=0) return conSnack(estado, 'Ingresa memoria válida', 'error');
       const so = Math.floor(totalUsuario * 0.10);
@@ -239,7 +212,7 @@ function intentarDesdeEspera(estado){
   const alg = estado.ui.algoritmo;
 
   if (!flex){
-    // ESTRICTO: solo intenta el PRIMERO
+
     const p = esperando[0];
     const res = asignarDinamicas(segs, p, alg);
     if (res.asignado){ segs = res.nuevos; ejecutando.push(p.id); esperando.shift(); }
@@ -296,8 +269,7 @@ function calcularEstadisticas(estado){
   const maxHueco = huecos.length? Math.max(...huecos.map(h=>h.tamaño)) : 0;
   let externa = 0;
   if (menorEnEspera>0 && libre >= menorEnEspera && maxHueco < menorEnEspera){
-    // hay memoria suficiente en total, pero fragmentada
-    externa = huecos.reduce((a,h)=>a+h.tamaño,0);
+    externa = libre; // contamos toda la libre como desperdiciada por fragmentación
   }
   return { usada, libre, fragExterna: externa, fragInterna: 0, desperdicioVacias: 0, desperdicio: externa };
 }
@@ -307,6 +279,45 @@ export default function App(){
   const [estado, despachar] = useReducer(reductor, estadoInicial);
   const [snack, setSnack] = useState(null);
   useEffect(()=>{ if (estado._snack) setSnack(estado._snack); }, [estado._snack]);
+
+  useEffect(()=>{
+    if (estado.ui.modo !== 'dinamicas') return;
+    if (!estado.esperando.length) return;
+    const huecos = estado.segmentos.filter(s=>s.tipo==='hueco');
+    if (!huecos.length) return;
+    const maxHueco = Math.max(...huecos.map(h=>h.tamaño));
+    const primero = estado.esperando[0];
+    if (!estado.ui.fifoFlexible){
+      // Estricto: solo intenta el primero y nunca procesa los siguientes
+      if (primero && maxHueco >= primero.tamaño) {
+        despachar({ tipo: Acciones.INTENTAR_DESDE_ESPERA });
+      }
+      // Si el primero no cabe, no hace nada (no revisa los demás)
+    } else {
+      // Flexible: si existe alguno que quepa, intentar
+      const cabeAlguno = estado.esperando.some(p=> maxHueco >= p.tamaño);
+      if (cabeAlguno) despachar({ tipo: Acciones.INTENTAR_DESDE_ESPERA });
+    }
+  }, [estado.segmentos, estado.esperando.length, estado.ui.fifoFlexible, estado.ui.modo]);
+
+  // Si cambia algoritmo o FIFO y hay en espera, reintenta respetando el modo FIFO
+  useEffect(()=>{
+    if (estado.ui.modo !== 'dinamicas' || !estado.esperando.length) return;
+    const huecos = estado.segmentos.filter(s=>s.tipo==='hueco');
+    if (!huecos.length) return;
+    const maxHueco = Math.max(...huecos.map(h=>h.tamaño));
+    const primero = estado.esperando[0];
+    if (!estado.ui.fifoFlexible){
+      // Estricto: solo intenta el primero
+      if (primero && maxHueco >= primero.tamaño) {
+        despachar({ tipo: Acciones.INTENTAR_DESDE_ESPERA });
+      }
+    } else {
+      // Flexible: si existe alguno que quepa, intentar
+      const cabeAlguno = estado.esperando.some(p=> maxHueco >= p.tamaño);
+      if (cabeAlguno) despachar({ tipo: Acciones.INTENTAR_DESDE_ESPERA });
+    }
+  }, [estado.ui.algoritmo, estado.ui.fifoFlexible, estado.segmentos, estado.esperando.length, estado.ui.modo]);
 
   return (
     <EstadoContexto.Provider value={{ estado, despachar }}>
@@ -331,9 +342,9 @@ function Encabezado(){
     <div className="bg-white border-b">
       <div className="max-w-6xl mx-auto p-3 flex items-center justify-between">
         <div className="flex items-center gap-3">
-          <Typography variant="h6">Gestión de Memoria Perrines Pro Plus Max </Typography>
+          <Typography variant="h6"> Sistemas Operativos 2: Gestión de Memoria</Typography>
           <Divider orientation="vertical" flexItem />
-          <Typography variant="body2" className="text-slate-600">{estado.ui.modo==='menu'? 'Menú' : estado.ui.modo==='dinamicas' ? 'Particiones Dinámicas' : 'Particiones Fijas'}</Typography>
+          <Typography variant="body2" className="text-slate-600">{estado.ui.modo==='menu'? 'Equipo 8' : estado.ui.modo==='dinamicas' ? 'Particiones Dinámicas' : 'Particiones Fijas'}</Typography>
         </div>
         <div className="flex items-center gap-2">
           {estado.ui.modo!=='menu' && (
@@ -371,24 +382,23 @@ function PantallaMenu(){
   return (
     <div className="md:col-span-3">
       <Box className="bg-white p-4 rounded-2xl shadow-sm">
-        <Typography variant="h6" className="mb-1">Ingresa el tamaño de la memoria (KB)</Typography>
+        <Typography variant="h6" className="mb-1">Ingresa tus valores para entrar al simulador </Typography>
         <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
           <Box className="p-4 border rounded-xl">
-            <Typography variant="subtitle1" className="mb-2">Parámetros</Typography>
+            <Typography variant="subtitle1" className="mb-2">Tamaño de la memoria (KB)</Typography>
             <div className="grid grid-cols-2 gap-3 items-end">
               <TextField label="Memoria del usuario (KB)" type="number" value={memTexto} onChange={e=>setMemTexto(e.target.value)} />
-              <div className="text-sm text-slate-500">SO sugerido (10%): {soCalculado||0} KB (solo visible)</div>
             </div>
           </Box>
           <Box className="p-4 border rounded-xl">
-            <Typography variant="subtitle1" className="mb-2">Particiones Fijas (manual)</Typography>
+            <Typography variant="subtitle1" className="mb-2">Particiones (Fijas)</Typography>
             <div className="grid grid-cols-3 gap-3 items-end">
               <TextField label="# Particiones" type="number" value={numPartTexto} onChange={e=>setNumPartTexto(e.target.value)} />
               <Button variant="outlined" onClick={()=>{
                 if (!Number.isFinite(mem) || mem<=0) return alert('Ingresa memoria válida primero');
                 if (!Number.isFinite(numPart) || numPart<=0) return alert('Ingresa número de particiones');
                 setAbrirConfig(true);
-              }}>Capturar tamaños…</Button>
+              }}>ingresar tamaños</Button>
               <div className="text-sm text-slate-500">Restante por asignar: {Math.max(0, restante)} KB</div>
             </div>
           </Box>
@@ -397,14 +407,14 @@ function PantallaMenu(){
           <Button variant="contained" onClick={()=>{
             if (!Number.isFinite(mem) || mem<=0) return alert('Ingresa memoria válida');
             despachar({tipo:Acciones.INICIALIZAR_DINAMICAS, datos:{ totalUsuario: mem }});
-          }}>Entrar a Dinámicas</Button>
+          }}>particiones Dinámicas</Button>
           <Button variant="outlined" onClick={()=>{
             if (!Number.isFinite(mem) || mem<=0) return alert('Ingresa memoria válida');
             despachar({tipo:Acciones.ENTRAR_FIJAS, datos:{ totalUsuario: mem }});
             if (tamaños.length && tamaños.reduce((a,b)=>a+b,0)===mem){
               despachar({tipo:Acciones.CONFIGURAR_FIJAS_MANUAL, datos:{ tamaños }});
             }
-          }}>Entrar a Fijas</Button>
+          }}>particiones Fijas</Button>
         </div>
       </Box>
 
@@ -469,10 +479,11 @@ function ModoDinamicas(){
           <TextField label="Nombre" value={nombre} onChange={e=>setNombre(e.target.value)} />
           <TextField label="Tamaño (KB)" type="number" value={tamañoTexto} onChange={e=>setTamañoTexto(e.target.value)} />
         </div>
-        <div className="flex gap-2">
-          <Button variant="contained" onClick={()=>{ if(!nombre.trim() || !Number.isFinite(tamaño) || tamaño<=0) return alert('Completa nombre y tamaño (>0)'); despachar({tipo:Acciones.AGREGAR_PROCESO, datos:{ nombre:nombre.trim(), tamaño }}); setNombre(""); setTamañoTexto(""); }}>Agregar</Button>
-          <Button color="secondary" variant="outlined" startIcon={<CompressIcon/>} onClick={()=>despachar({tipo:Acciones.COMPACTAR})}>Compactar</Button>
-          <Button variant="text" color="inherit" startIcon={<RestartAltIcon/>} onClick={()=>despachar({tipo:Acciones.REINICIAR})}>Reset</Button>
+        <div className="flex flex-col gap-3 w-40">
+          <Button fullWidth variant="contained" onClick={()=>{ if(!nombre.trim() || !Number.isFinite(tamaño) || tamaño<=0) return alert('Completa nombre y tamaño (>0)'); despachar({tipo:Acciones.AGREGAR_PROCESO, datos:{ nombre:nombre.trim(), tamaño }}); setNombre(""); setTamañoTexto(""); }}>Agregar</Button>
+          <Button fullWidth color="secondary" variant="outlined" startIcon={<CompressIcon/>} onClick={()=>despachar({tipo:Acciones.COMPACTAR})}>Compactar</Button>
+ 
+          <Button fullWidth variant="text" color="inherit" startIcon={<RestartAltIcon/>} onClick={()=>despachar({tipo:Acciones.REINICIAR})}>Reset</Button>
         </div>
       </div>
 
@@ -665,16 +676,6 @@ function TablaProcesos({ titulo, filas, botonAccion, mostrarNota=false }){
 
 function PanelCapturas({ capturas }){
   return (
-    <div className="md:col-span-3 bg-white p-4 rounded-2xl shadow-sm">
-      <Typography variant="subtitle1" className="mb-2">Historial</Typography>
-      <div className="flex gap-2 overflow-x-auto">
-        {capturas.map(c=> (
-          <div key={c.ts} className="min-w-[220px] p-2 border rounded-lg text-xs">
-            <div className="font-medium mb-1">{new Date(c.ts).toLocaleTimeString()} · {c.etiqueta}</div>
-            <div>Usada: {c.estadisticas.usada}KB · Libre: {c.estadisticas.libre}KB</div>
-          </div>
-        ))}
-      </div>
-    </div>
+   console.log(capturas)
   );
 }
